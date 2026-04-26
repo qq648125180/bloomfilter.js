@@ -1,48 +1,96 @@
-Bloom Filter
+Bloom Filter (Teaching Version)
 ============
 
-This JavaScript bloom filter implementation uses the non-cryptographic
-[Fowler–Noll–Vo hash function][1] for speed.
+This is a simple JavaScript implementation of a **Bloom Filter**, designed for
+learning and understanding the data structure.
 
-Usage
------
+---
 
-    var bloom = new BloomFilter(
-      32 * 256, // number of bits to allocate.
-      16        // number of hash functions.
-    );
+## What is a Bloom Filter?
 
-    // Add some elements to the filter.
-    bloom.add("foo");
-    bloom.add("bar");
+A Bloom Filter is a probabilistic data structure used to test whether an element
+is in a set.
 
-    // Test if an item is in our filter.
-    // Returns true if an item is probably in the set,
-    // or false if an item is definitely not in the set.
-    bloom.test("foo");
-    bloom.test("bar");
-    bloom.test("blah");
+It has two key properties:
 
-    // Serialisation. Note that bloom.buckets may be a typed array,
-    // so we convert to a normal array first.
-    var array = [].slice.call(bloom.buckets),
-        json = JSON.stringify(array);
+- It may return **false positives** (says "exists" but actually doesn't)
+- It will **never return false negatives** (if it says "not exists", it is correct)
 
-    // Deserialisation. Note that the any array-like object is supported, but
-    // this will be used directly, so you may wish to use a typed array for
-    // performance.
-    var bloom = new BloomFilter(array, 3);
+---
 
-Implementation
---------------
+## How it works
 
-Although the bloom filter requires *k* hash functions, we can simulate this
-using only *two* hash functions.  In fact, we cheat and get the second hash
-function almost for free by iterating once more on the first hash using the FNV
-hash algorithm.
+1. You hash a value into multiple positions (k hash functions)
+2. Set those positions to 1 in a bit array
+3. To check a value:
+   - If any bit is 0 → definitely NOT in set
+   - If all bits are 1 → probably in set
 
-Thanks to Will Fitzgerald for his [help and inspiration][2] with the hashing
-optimisation.
+---
 
-[1]: http://isthe.com/chongo/tech/comp/fnv/
-[2]: http://willwhim.wordpress.com/2011/09/03/producing-n-hash-functions-by-hashing-only-once/
+## Parameters
+
+- `m` = number of bits (size of the filter)
+- `k` = number of hash functions
+
+Tradeoff:
+
+- larger `m` → fewer false positives
+- larger `k` → more accuracy but slower
+
+---
+
+## Usage
+
+```js
+var BloomFilter = require("./bloomfilter").BloomFilter;
+
+var bloom = new BloomFilter(32 * 256, 16);
+
+bloom.add("apple");
+bloom.add("banana");
+
+console.log(bloom.test("apple"));   // true
+console.log(bloom.test("orange"));  // probably false
+```
+
+---
+
+## Important Notes
+
+- You **cannot delete elements** from a Bloom Filter
+- You must reuse the same `k` when restoring from serialized data
+
+```js
+var array = [].slice.call(bloom.buckets);
+var bloom2 = new BloomFilter(array, 16);
+```
+
+---
+
+## Why only 2 hash functions?
+
+This implementation uses a trick called **double hashing**:
+
+Instead of computing k independent hashes, it uses:
+
+    h1(x), h1(x)+h2(x), h1(x)+2*h2(x), ...
+
+This is faster and widely used in practice.
+
+---
+
+## Learning Focus
+
+This repo is intentionally simple:
+
+- no dependencies
+- no build step
+- readable implementation
+
+Perfect for understanding how Bloom Filters work internally.
+
+---
+
+[Original idea and reference]
+http://isthe.com/chongo/tech/comp/fnv/
