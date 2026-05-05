@@ -1,131 +1,248 @@
 (function(exports) {
+  "use strict";
+
   exports.BloomFilter = BloomFilter;
   exports.fnv_1a = fnv_1a;
   exports.fnv_1a_b = fnv_1a_b;
 
   var typedArrays = typeof ArrayBuffer !== "undefined";
+  var VERSION = 1;
+  var HASH_ALGORITHM = "fnv-1a-double-hashing";
 
-  // Creates a new bloom filter.  If *m* is an array-like object, with a length
-  // property, then the bloom filter is loaded with data from the array, where
-  // each element is a 32-bit integer.  Otherwise, *m* should specify the
-  // number of bits.  Note that *m* is rounded up to the nearest multiple of
-  // 32.  *k* specifies the number of hashing functions.
-  function BloomFilter(m, k) {
+  // Creates a new bloom filter.
+  //
+  // Backwards-compatible constructor:
+  //   new BloomFilter(m, k)
+  //   new BloomFilter(serializedBuckets, k)
+  //
+  // Production-friendly factory:
+  //   BloomFilter.create(expectedInsertions, falsePositiveProbability)
+  //
+  // If m is an array-like object, the filter is loaded from bucket data.
+  // Otherwise, m is the number of bits and is rounded up to a multiple of 32.
+  function BloomFilter(m, k, options) {
     var a;
-    if (typeof m !== "number") a = m, m = a.length * 32;
+    options = options || {};
 
-    var n = Math.ceil(m / 32),
-        i = -1;
-    this.m = m = n * 32;
+    if (typeof m !== "number") {
+      a = m;
+      if (!a || typeof a.length !== "number") {
+        throw new TypeError("m must be a positive number of bits or an array-like bucket snapshot");
+      }
+      m = a.length * 32;
+    }
+
+    validatePositiveInteger(m, "m");
+    validatePositiveInteger(k, "k");
+
+    var n = Math.ceil(m / 32);
+    var i = -1;
+
+    this.m = n * 32;
     this.k = k;
+    this.expectedInsertions = options.expectedInsertions || null;
+    this.falsePositiveProbability = options.falsePositiveProbability || null;
+    this.hashAlgorithm = HASH_ALGORITHM;
+    this.insertions = options.insertions || 0;
 
-    // The filter stores bits in 32-bit buckets.  For example, a filter with
-    // 8,192 bits uses 256 buckets.  Typed arrays are faster and more compact in
-    // modern JavaScript runtimes, but the plain array fallback keeps this file
-    // usable in older environments.
     if (typedArrays) {
-      var kbytes = 1 << Math.ceil(Math.log(Math.ceil(Math.log(m) / Math.LN2 / 8)) / Math.LN2),
-          array = kbytes === 1 ? Uint8Array : kbytes === 2 ? Uint16Array : Uint32Array,
-          kbuffer = new ArrayBuffer(kbytes * k),
-          buckets = this.buckets = new Int32Array(n);
-      if (a) while (++i < n) buckets[i] = a[i];
-      this._locations = new array(kbuffer);
+      this.buckets = new Int32Array(n);
+      if (a) {
+        if (a.length !== n) throw new Error("bucket snapshot length does not match filter size");
+        while (++i < n) this.buckets[i] = a[i] | 0;
+      }
+      this._locations = new Uint32Array(k);
     } else {
-      var buckets = this.buckets = [];
-      if (a) while (++i < n) buckets[i] = a[i];
-      else while (++i < n) buckets[i] = 0;
+      this.buckets = [];
+      if (a) {
+        if (a.length !== n) throw new Error("bucket snapshot length does not match filter size");
+        while (++i < n) this.buckets[i] = a[i] | 0;
+      } else {
+        while (++i < n) this.buckets[i] = 0;
+      }
       this._locations = [];
     }
   }
 
-  // Computes the k bit locations for value v.
-  //
-  // A Bloom filter conceptually needs k independent hash functions.  This
-  // implementation uses double hashing instead: it computes two hashes, a and
-  // b, and then generates locations with:
-  //
-  //   a, a + b, a + 2b, ..., a + (k - 1)b   modulo m
-  //
-  // This is a common trick that is much faster than running k full hash
-  // functions for every add/test operation.
-  //
-  // See http://willwhim.wordpress.com/2011/09/03/producing-n-hash-functions-by-hashing-only-once/
+  // Builds a filter from capacity and target false-positive probability.
+  BloomFilter.create = function(expectedInsertions, falsePositiveProbability) {
+    validatePositiveInteger(expectedInsertions, "expectedInsertions");
+    validateFalsePositiveProbability(falsePositiveProbability);
+
+    var m = BloomFilter.optimalNumOfBits(expectedInsertions, falsePositiveProbability);
+    var k = BloomFilter.optimalNumOfHashFunctions(expectedInsertions, m);
+
+    return new BloomFilter(m, k, {
+      expectedInsertions: expectedInsertions,
+      falsePositiveProbability: falsePositiveProbability
+    });
+  };
+
+  BloomFilter.optimalNumOfBits = function(expectedInsertions, falsePositiveProbability) {
+    validatePositiveInteger(expectedInsertions, "expectedInsertions");
+    validateFalsePositiveProbability(falsePositiveProbability);
+    return Math.ceil(-expectedInsertions * Math.log(falsePositiveProbability) / (Math.LN2 * Math.LN2));
+  };
+
+  BloomFilter.optimalNumOfHashFunctions = function(expectedInsertions, bitSize) {
+    validatePositiveInteger(expectedInsertions, "expectedInsertions");
+    validatePositiveInteger(bitSize, "bitSize");
+    return Math.max(1, Math.round(bitSize / expectedInsertions * Math.LN2));
+  };
+
+  BloomFilter.fromJSON = function(json) {
+    if (typeof json === "string") json = JSON.parse(json);
+    if (!json || typeof json !== "object") throw new TypeError("invalid bloom filter JSON");
+    if (json.version !== VERSION) throw new Error("unsupported bloom filter version: " + json.version);
+    if (json.hashAlgorithm && json.hashAlgorithm !== HASH_ALGORITHM) {
+      throw new Error("unsupported hash algorithm: " + json.hashAlgorithm);
+    }
+    if (!json.buckets || typeof json.buckets.length !== "number") {
+      throw new Error("invalid bloom filter bucket snapshot");
+    }
+    return new BloomFilter(json.buckets, json.k, {
+      expectedInsertions: json.expectedInsertions || null,
+      falsePositiveProbability: json.falsePositiveProbability || null,
+      insertions: json.insertions || 0
+    });
+  };
+
+  // Computes the k bit locations for value v using double hashing.
   BloomFilter.prototype.locations = function(v) {
-    var k = this.k,
-        m = this.m,
-        r = this._locations,
-        a = fnv_1a(v),
-        b = fnv_1a_b(a),
-        i = -1,
-        x = a % m;
+    var k = this.k;
+    var m = this.m;
+    var r = this._locations;
+    var a = fnv_1a(v);
+    var b = fnv_1a_b(a);
+    var i = -1;
+    var x = a % m;
+
     while (++i < k) {
-      r[i] = x < 0 ? (x + m) : x;
+      r[i] = x < 0 ? x + m : x;
       x = (x + b) % m;
     }
     return r;
   };
 
-  // Adds a value to the filter by setting all k computed bit locations to 1.
-  // Values are converted to strings so numbers, booleans, and strings follow
-  // the same hashing path.
+  // Adds a value. Returns true when at least one new bit was set.
   BloomFilter.prototype.add = function(v) {
-    var l = this.locations(v + ""),
-        i = -1,
-        k = this.k,
-        buckets = this.buckets;
-    while (++i < k) buckets[Math.floor(l[i] / 32)] |= 1 << (l[i] % 32);
+    var l = this.locations(v + "");
+    var i = -1;
+    var k = this.k;
+    var buckets = this.buckets;
+    var changed = false;
+
+    while (++i < k) {
+      var bit = l[i];
+      var index = bit >>> 5;
+      var mask = 1 << (bit & 31);
+      var old = buckets[index];
+      var value = old | mask;
+      if (value !== old) {
+        buckets[index] = value;
+        changed = true;
+      }
+    }
+    this.insertions++;
+    return changed;
   };
 
-  // Tests whether all k bit locations are already set.
-  //
-  // false means the value is definitely not in the set.
-  // true means the value is probably in the set, because different values may
-  // set the same bits by coincidence.
+  // Tests whether a value may be present.
   BloomFilter.prototype.test = function(v) {
-    var l = this.locations(v + ""),
-        i = -1,
-        k = this.k,
-        b,
-        buckets = this.buckets;
+    var l = this.locations(v + "");
+    var i = -1;
+    var k = this.k;
+    var buckets = this.buckets;
+
     while (++i < k) {
-      b = l[i];
-      if ((buckets[Math.floor(b / 32)] & (1 << (b % 32))) === 0) {
-        return false;
-      }
+      var bit = l[i];
+      if ((buckets[bit >>> 5] & (1 << (bit & 31))) === 0) return false;
     }
     return true;
   };
 
-  // Estimated cardinality.
-  //
-  // The filter cannot know the exact number of inserted values, because it only
-  // stores bits.  This estimates the count from the fraction of bits that are
-  // currently set.
-  BloomFilter.prototype.size = function() {
-    var buckets = this.buckets,
-        bits = 0;
+  // Alias with clearer probabilistic semantics for production code.
+  BloomFilter.prototype.mightContain = BloomFilter.prototype.test;
+
+  BloomFilter.prototype.bitSize = function() {
+    return this.m;
+  };
+
+  BloomFilter.prototype.numHashFunctions = function() {
+    return this.k;
+  };
+
+  BloomFilter.prototype.bitCount = function() {
+    var buckets = this.buckets;
+    var bits = 0;
     for (var i = 0, n = buckets.length; i < n; ++i) bits += popcnt(buckets[i]);
+    return bits;
+  };
+
+  BloomFilter.prototype.loadFactor = function() {
+    return this.bitCount() / this.m;
+  };
+
+  // Estimated unique cardinality from the fraction of set bits.
+  BloomFilter.prototype.size = function() {
+    var bits = this.bitCount();
+    if (bits === 0) return 0;
+    if (bits >= this.m) return Infinity;
     return -this.m * Math.log(1 - bits / this.m) / this.k;
   };
 
+  BloomFilter.prototype.estimatedFalsePositiveRate = function(insertions) {
+    var n = insertions == null ? this.size() : insertions;
+    if (n <= 0) return 0;
+    return Math.pow(1 - Math.exp(-this.k * n / this.m), this.k);
+  };
+
+  BloomFilter.prototype.isOverCapacity = function() {
+    return this.expectedInsertions != null && this.size() > this.expectedInsertions;
+  };
+
+  BloomFilter.prototype.toJSON = function() {
+    return {
+      version: VERSION,
+      hashAlgorithm: HASH_ALGORITHM,
+      m: this.m,
+      k: this.k,
+      expectedInsertions: this.expectedInsertions,
+      falsePositiveProbability: this.falsePositiveProbability,
+      insertions: this.insertions,
+      buckets: Array.prototype.slice.call(this.buckets)
+    };
+  };
+
+  BloomFilter.prototype.toObject = BloomFilter.prototype.toJSON;
+
+  function validatePositiveInteger(value, name) {
+    if (typeof value !== "number" || !isFinite(value) || value <= 0 || Math.floor(value) !== value) {
+      throw new RangeError(name + " must be a positive integer");
+    }
+  }
+
+  function validateFalsePositiveProbability(value) {
+    if (typeof value !== "number" || !isFinite(value) || value <= 0 || value >= 1) {
+      throw new RangeError("falsePositiveProbability must be a number between 0 and 1");
+    }
+  }
+
   // Counts the number of 1 bits in a 32-bit integer.
-  // http://graphics.stanford.edu/~seander/bithacks.html#CountBitsSetParallel
   function popcnt(v) {
     v -= (v >> 1) & 0x55555555;
     v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
-    return ((v + (v >> 4) & 0xF0F0F0F) * 0x1010101) >> 24;
+    return ((v + (v >> 4) & 0xF0F0F0F) * 0x1010101) >>> 24;
   }
 
   // Fowler/Noll/Vo hashing.
-  //
-  // This is a fast non-cryptographic hash.  It is useful here because a Bloom
-  // filter needs speed and distribution, not cryptographic security.
   function fnv_1a(v) {
-    var n = v.length,
-        a = 2166136261,
-        c,
-        d,
-        i = -1;
+    var n = v.length;
+    var a = 2166136261;
+    var c;
+    var d;
+    var i = -1;
+
     while (++i < n) {
       c = v.charCodeAt(i);
       if (d = c & 0xff000000) {
@@ -143,7 +260,7 @@
       a ^= c & 0xff;
       a += (a << 1) + (a << 4) + (a << 7) + (a << 8) + (a << 24);
     }
-    // From http://home.comcast.net/~bretm/hash/6.html
+
     a += a << 13;
     a ^= a >> 7;
     a += a << 3;
@@ -152,8 +269,6 @@
     return a & 0xffffffff;
   }
 
-  // One additional iteration of FNV, given a hash.
-  // This creates the second hash used by double hashing in locations().
   function fnv_1a_b(a) {
     a += (a << 1) + (a << 4) + (a << 7) + (a << 8) + (a << 24);
     a += a << 13;

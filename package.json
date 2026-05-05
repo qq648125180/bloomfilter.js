@@ -1,25 +1,27 @@
 {
   "name": "bloomfilter",
-  "version": "0.0.14",
-  "description": "Fast bloom filter in JavaScript.",
+  "version": "0.1.0",
+  "description": "Fast production-ready Bloom filter in JavaScript.",
   "keywords": [
     "bloom filter",
-    "probabilistic data structure"
+    "probabilistic data structure",
+    "deduplication",
+    "cache"
   ],
-  "homepage": "https://github.com/jasondavies/bloomfilter.js",
+  "homepage": "https://github.com/qq648125180/bloomfilter.js",
   "author": {
     "name": "Jason Davies",
     "url": "http://www.jasondavies.com/"
   },
   "repository": {
     "type": "git",
-    "url": "http://github.com/jasondavies/bloomfilter.js.git"
+    "url": "https://github.com/qq648125180/bloomfilter.js.git"
   },
   "main": "bloomfilter.js",
-  "devDependencies": {
-    "vows": "0.7.0"
+  "engines": {
+    "node": ">=12"
   },
   "scripts": {
-    "test": "./node_modules/vows/bin/vows"
+    "test": "node test/bloomfilter-test.js"
   }
 }
